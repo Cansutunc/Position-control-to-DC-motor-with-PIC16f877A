@@ -1,0 +1,159 @@
+#include <16F877A.h>        // Kullanýlacak denetleyicinin baþlýk dosyasý tanýtýlýyor.
+#device adc=10              // 10 bitlik ADC kullanýlacaðý belirtiliyor.
+#FUSES XT, NOWDT, NOPROTECT, NOBROWNOUT, NOLVP, NOPUT, NODEBUG, NOCPD // Denetleyici konfigürasyon ayarlarý
+#use delay(crystal=4000000) // Gecikme fonksiyonu için kullanýlacak osilatör frekansý belirtiliyor.
+
+#include <lcd.c> // lcd.c dosyasý tanýtýlýyor
+
+#define  in1 pin_b1 //PORTB1'e  in1 ismi veriliyor
+#define  in2 pin_b2 //PORTB2'ye in2 ismi veriliyor
+
+
+signed long rev = 0;        //"rev"  isimli bir deðiþken tanýmlanýyor.
+signed long error= 1;       //"error"  isimli bir deðiþken tanýmlanýyor.
+signed long duty_cycle=0;   //"duty_cycle"  isimli bir deðiþken tanýmlanýyor.
+signed int quad = 0;        //"quad"  isimli bir deðiþken tanýmlanýyor.
+signed long change = 0;     //"change" isimli bir deðiþken tanýmlanýyor.
+signed long angle = 0.0f;   //"angle"  isimli bir deðiþken tanýmlanýyor.
+signed long value;          //"value"  isimli bir deðiþken tanýmlanýyor.
+signed long last_read;      //"last_read"  isimli bir deðiþken tanýmlanýyor.
+int8 encoderread;           //"encoderread"  isimli bir deðiþken tanýmlanýyor.
+long realposition=0;        //"realposition"  isimli bir deðiþken tanýmlanýyor.
+unsigned long Kp=0;         //"Kp"  isimli bir deðiþken tanýmlanýyor. Kontrol parametresi, adc_1'e baðlý pottan elde edilen bilgiye göre hesaplanýr
+unsigned int16 refangle= 20;   //"refangle"  isimli bir deðiþken tanýmlanýyor. adc_0'a baðlý pottan elde edilen bilgiye göre hesaplanýr
+
+
+#INT_RB                             //RB kesmesi, b4-b7 pinlerinde herhangi ibr deðiþim olduðunda devreye girer. 
+                                    //Motora baðlý olarak dönen Enkoder bilgisini okumak için kullanýlacak.
+void RB_IOC_ISR(void)               //encoder kesmesi
+{
+  clear_interrupt(INT_RB);          // Kesme bayraðýný 0 yap.
+  encoderread = input_b() & 0x30;   // 8 btlik PORTB deðerini h'30' (00110000) sayýsý ile bit bit and iþlemine tabi tut ve "encoderread" deðiþkenine aktar.
+                                    // Bu satýrda maskeleme yapýlmaktadýr. Yani portb'nin 4 ve 5. bitleri hariç diðer bitleri 0 yapýlmaktadýr.
+  if(encoderread==last_read)        // Eðer "enkoderread" deðiþeninin içeriði "last_read" deðiþkeninin içeriðine eþit ise;
+   return;                          // Kesmeden çýk ve programýn iþleyiþine kaldýðý yerden devam et.
+   
+                                    // "enkoderread" deðiþeninin içeriði "last_read" deðiþkeninin içeriðine eþit deðil ise yani enkoder bilgisinde deðiþim var ise ;
+  if(bit_test(encoderread,4)==bit_test(last_read,5))  // Eðer "encoderread" deðiþkeninin 4 ve 5. bitleri (ayný zamanda portb'nin 4 ve 5. bitleri)birbirine eþit ise 
+   {
+   quad += 1;                       // "quad" deðiþkeninin içeriðini bir artýr. (ileri dönüþ)
+   }
+   
+   else                             // Eðer "encoderread" deðiþkeninin 4 ve 5. bitleri (ayný zamanda portb'nin 4 ve 5. bitleri)birbirine eþit deðil ise
+   {
+   quad -= 1;                       // "quad" deðiþkeninin içeriðini bir azalt. (geri dönüþ)
+   }
+   
+   last_read=encoderread;           // "enkoderread" deðiþkeninin içeriðini "last_read" deðiþkeninin içeriðine aktar. (bir sonraki karþýlaþtýrma için "last_read" deðiþkenini hazýrlar)
+}
+
+
+signed int encoderget(void)         // Pals sayýsýný tespit etmek için kullanýlacak fonksiyon
+{
+ 
+ signed int value = 0 ;             // "value" deðiþkenine 0 yap.
+ while (quad>=4)                    // "quad" deðiþkeninin içeriði 4e eþit veya 4'den büyük olduðu sürece aþaðýdaki iki satýr iþlenir. 
+                                    // burada amaç "quad" deðiþkeni içeriðini 4'er azaltýrken "value" deðiþkeninin içerðini 1 artýrarak,
+                                    // enkoderin (dolayýsý ile motorun) ileri yönde  ne kadar döndüðünü hesaplamaktýr
+ {
+   value += 1;                      // "value" deðiþkeninin içerðini 1 artýr
+   quad -= 4;                       // "quad" deðiþkeni içeriðini 4 azalt
+ }
+ while(quad<=-4)                    // "quad" deðiþkeninin içeriði -4'e eþit veya -4'den küçük olduðu sürece aþaðýdaki iki satýr iþlenir. 
+                                    // burada amaç "quad" deðiþkeni içeriðini 4'er artýrýrken "value" deðiþkeninin içerðini 1 azaltarak,
+                                    // enkoderin (dolayýsý ile motorun) geri yönde  ne kadar döndüðünü hesaplamaktýr
+ {
+  value -= 1;                       // // "value" deðiþkeninin içerðini 1 azalt
+  quad += 4;                        // "quad" deðiþkeni içeriðini 4 artýr
+ }
+ return value;                      // "value" deðiþkeninin içeriði ile geri dön
+}
+
+
+void main()       // Ana program
+{
+ lcd_init();                          // LCD hazýr hale getiriliyor
+ delay_ms(10);                        // 10mSn bekleme süresi
+ set_tris_c(0xff);                    // PORTC tamamý çýkýþ. sadece RC2 pwm çýkýþý olarak kullanýlacak
+ setup_ccp1(CCP_PWM);                 // RC2 pini PWM çýkýþý olarak ayarlandý (4KHz)
+ setup_timer_2(T2_DIV_BY_16, 255, 1); // PWM sinyalinin frekans ayarý için timer2 parametreleri ayarlanýyor.
+ setup_adc(adc_clock_div_32);         // ADC clock frekansý fosc/32
+ setup_adc_ports(AN0_AN1_AN3);        // A0, A1, A3 ANALOG GÝRÝÞ OLARAK AYARLANIYOR. A3 kullanýlmayacak, kod böyle.
+
+ enable_interrupts(INT_RB);           // RB kesmesini aktif yap
+ enable_interrupts(GLOBAL);           // Tüm kesmelere izin ver
+
+ output_low(in1);                     // Motor sürücü "in1" giriþine 0 veriliyor
+ output_low(in2);                     // Motor sürücü "in2" giriþine 0 veriliyor 
+                                      // Bu duruma göre motor dönmez.
+
+
+while(1)
+{
+  set_adc_channel(0);                        // RA0/AN0  ADC iþlemine için hazýrla
+  delay_us(10);                              // 10mSn bekleme süresi
+  refangle = read_adc()*250.0f/1023+20 ;     // ADC'den okunan veriyi formül ile  referans açýsýna çevir.
+  printf(LCD_PUTC,"\fRef:%lu",refangle);     // referans açýsý deðerini LCD'ye yazdýr.
+  delay_ms(10);                              // 10mSn bekleme süresi
+  
+  set_adc_channel(1);                        // RA0/AN0  ADC iþlemine için hazýrla
+  delay_us(10);                              // 10mSn bekleme süresi
+  Kp = read_adc()*500f/1023+20 ;            // ADC'den okunan veriyi formül ile  Kp deðerine çevir.
+  lcd_gotoxy(8,1);                           // LCD'de, belirtilen konuma git
+  printf(LCD_PUTC,",Kp:%lu",Kp);             // Kp deðerini LCD'ye yazdýr.
+  delay_ms(10);                              // 10mSn bekleme süresi
+  
+  change=encoderget();                       // encoderget() fonksiyonu çaliþtýrýlýr. 
+                                             // Fonksiyonun iþletilmesi sonuvu elde edilen value deðeri "change" deðiþkenine yüklenir. 
+                                             // "change" deðiþkenimne yüklenen aslýnda motorun hareketi sonucu elde edilen konum deðiþim bilgisidir.
+      if(change)
+            {
+            realposition =realposition+change; // motorun hareketi sonucu elde edilen konum deðiþim bilgisi, motorun önceki konum bilgisi üzerine eklenir (+ veya -)             
+            } 
+       
+      error=refangle - realposition ;        // Referans konum bilgisi ile motorun mevcut konum bilgisi arasýndaki fark bulunarak "error" deðiþkenine yüklenir
+      printf(LCD_PUTC," \nEr:%li",error);    // error deðerini LCD'ye yazdýr
+      lcd_gotoxy(8,2);                       // LCD'de, belirtilen konuma git
+      printf(LCD_PUTC,",Pwm:%li",duty_cycle); //pwm görev çevrimi (duty cycle) deðerini LCD'ye yazdýr 
+      delay_ms(100);                         // 100mSn bekleme süresi
+            
+       while(error!=0)                       // Eðer "error" deðeri 0'dan farklý ise
+       {
+          duty_cycle= abs(Kp*error);         // "error" deðerinin "Kp" deðeri ile çarpýmý sonucunun mutlak deðerini pwm görev çevrimi (duty cycle) deðeri olarak belirle
+          if(duty_cycle>=1023){duty_cycle=1023;}  //eðer "duty_cycle" deðeri 1203'den büyük ise 1023 olarak belirle. Maximum "duty_cycle" deðeri 1023 (%100)
+          set_pwm1_duty(duty_cycle);              // PWM1 çýkýþýndan alýnan PWM sinyalinin görevçevrimi (duty cycle) oranýný güncelle
+          if(error>0)                             // Eðer "error" deðeri 0'dan büyük ise
+          {
+          output_low(in1);                        // Motor sürücü "in1" giriþine 0 veriliyor
+          output_high(in2);                       // Motor sürücü "in2" giriþine 1 veriliyor 
+                                                  // Bu duruma göre motor ileri hareket eder
+          }         
+          else if(error<0)                         // Eðer "error" deðeri 0'dan büyük ise
+          {
+          output_high(in1);                        // Motor sürücü "in1" giriþine 1 veriliyor
+          output_low(in2);                         // Motor sürücü "in2" giriþine 0 veriliyor 
+                                                   // Bu duruma göre motor geri hareket eder
+          }       
+          change=encoderget();               // encoderget() fonksiyonu çaliþtýrýlýr. 
+                                             // Fonksiyonun iþletilmesi sonuvu elde edilen value deðeri "change" deðiþkenine yüklenir. 
+                                             // "change" deðiþkenimne yüklenen aslýnda motorun hareketi sonucu elde edilen konum deðiþim bilgisidir.
+          realposition =realposition+change; // motorun hareketi sonucu elde edilen konum deðiþim bilgisi, motorun önceki konum bilgisi üzerine eklenir (+ veya -)    
+          error=refangle - realposition;     // Referans konum bilgisi ile motorun mevcut konum bilgisi arasýndaki fark bulunarak "error" deðiþkenine yüklenir
+          printf(LCD_PUTC,"\fRef:%lu",refangle);      // referans açýsý deðerini LCD'ye yazdýr.
+          lcd_gotoxy(8,1);                            // LCD'de, belirtilen konuma git
+          printf(LCD_PUTC,",Kp:%lu",Kp);              // Kp deðerini LCD'ye yazdýr.
+          printf(LCD_PUTC," \nEr:%li",error);         // error deðerini LCD'ye yazdýr
+          lcd_gotoxy(8,2);                            // LCD'de, belirtilen konuma git
+          printf(LCD_PUTC,",Pwm:%li",duty_cycle);     // pwm görev çevrimi (duty cycle) deðerini LCD'ye yazdýr 
+           delay_ms(20);                              // 20mSn bekleme süresi
+       } 
+          duty_cycle= abs(Kp*error);                  // "error" deðerinin "Kp" deðeri ile çarpýmý sonucunun mutlak deðerini pwm görev çevrimi (duty cycle) deðeri olarak belirle
+                                                      // konum düzeltmesi sonucu "error" deðeri 0 olacaðý için "duty_cycle" deðiþkeni içeriði de 0 olur
+          set_pwm1_duty(duty_cycle);                  // PWM1 çýkýþýndan alýnan PWM sinyalinin görev çevrimi (duty cycle) oraný 0 olrak güncellenir ve motor durur.
+          delay_ms(100);                              // 100mSn bekleme süresi
+          rev=realposition/360.0f;                    // 360, devir baþýna enkoder darbelerini temsil eder
+          angle = ((int16)(rev*360))%360;             // Gerçek zamanlý açý deðeri burada hesaplanýyor.
+                                                      // "rev" deðeri 360 ile çarpýldýktan sonra 16 bit tamsayý deðiþkenine çevriliyor ve 
+                                                      
+}}
+    
